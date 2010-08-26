@@ -1,0 +1,452 @@
+<?php
+// $Id: vcard.module,v 1.17.2.6 2009/10/21 09:59:09 sanduhrs Exp $
+
+/**
+ * vCard is a file format standard for electronic business cards.
+ * vCards are often attached to e-mail messages, but can be exchanged in other ways,
+ * such as on the World Wide Web. (http://en.wikipedia.org/wiki/Vcard)
+ *
+ * This module creates downloadable vCards based on profile fields.
+ * It is possible to output hCards (http://en.wikipedia.org/wiki/Hcard)
+ * on a user's profile page via themeable function.
+ */
+
+/**
+ * Implementation of hook_requirements().
+ */
+function vcard_requirements($phase) {
+  $requirement = array();
+  // Ensure translations don't break at install time
+  $t = get_t();
+  $init = _vcard_init();
+
+  if ($phase == 'runtime') {
+    $requirement['vcard'] = array(
+      'title' => t('PEAR Contact_Vcard_Build'),
+      'value' => $init ? t('Available.') : t('Not available.'),
+      'description' => t(l('PEAR Contact_Vcard_Build package', 'http://pear.php.net/package/Contact_Vcard_Build') .' for vcard generation.'),
+      'severity' => $init ? REQUIREMENT_OK : REQUIREMENT_ERROR,
+    );
+  }
+
+  return $requirement;
+}
+
+/**
+ * Implementation of hook_help().
+ */
+function vcard_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#vcard':
+      return t("
+        <p>
+        vCard automates the exchange of personal information typically found on a traditional business card. vCard is used in applications such as Internet mail, voice mail, Web browsers, telephony applications, call centers, video conferencing, PIMs (Personal Information Managers), PDAs (Personal Data Assistants), pagers, fax, office equipment, and smart cards. vCard information goes way beyond simple text, and includes elements like pictures, company logos, live Web addresses, and so on.
+        </p>
+        <p>
+        Web browsers and !aggregation_tools can also extract and use vCard-like information when it is displayed on the page using !hcard - an embedded !microformat.
+        Read the vCard module's INSTALL.txt documentation for more information on how to add hCard support to your theme.
+        </p>
+        <pre>",
+        array(
+          '!aggregation_tools' => l('aggregation tools', 'https://addons.mozilla.org/en-US/firefox/addon/2240'),
+          '!hcard' => l('hCard', 'http://microformats.org/wiki/hcard'),
+          '!microformat' => l('microformat', 'http://microformats.org'),
+        )
+      );
+      break;
+    case 'admin/user/profile':
+      return t("<p>
+        For assistance setting up a default profile with common fields, visit
+        <a href='!vcard_settings_link'>the VCard settings</a> which can preset an automatic profile definition.
+      </p><p>
+        To enable machine-readable <a href='!microformat_link'>microformats</a>
+        for your profiles, see the <a href='!vcard_help_link'>vCard help</a> and README. 
+      </p>",
+      array(
+        '!vcard_settings_link' => url('admin/settings/vcard'),
+        '!vcard_help_link' => url('admin/help/vcard'),
+        '!microformat_link' => url('http://microformats.org'),
+      )
+    );
+    case 'admin/settings/vcard':
+      return t("
+        Profile fields are added and administered on
+        <a href='!profile_settings_link'>the Profile Configuration page</a>.
+      ",
+      array(
+        '!profile_settings_link' => url('admin/user/profile'),
+      )
+    );
+  }
+}
+
+/**
+ * Implementation of hook_perm().
+ *
+ * @return an array of permissions
+ */
+function vcard_perm() {
+  return array('administer vcard', 'have vcard', 'download vcard', 'download vcard with e-mail');
+}
+
+/**
+ * Implementation of hook_menu().
+ *
+ * @return an array of menu items
+ */
+function vcard_menu() {
+  $items = array();
+
+  $items['admin/settings/vcard'] = array(
+    'title' => 'vCard',
+    'description' => "Configure the profile field mapuserpings.",
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('vcard_admin_settings'),
+    'access arguments' => array('administer vcard'),
+    'file' => 'vcard.admin.inc',
+  );
+  $items['user/%/vcard'] = array(
+    'title' => t('vcard'),
+    'type' => MENU_CALLBACK,
+    'page callback' => 'vcard_fetch',
+    'page arguments' => array(1),
+    'access callback' => 'vcard_perm_check',
+  );
+
+  return $items;
+}
+
+/**
+ * Check download permissions
+ * Custom menu access callback
+ *
+ * @return boolean
+ */
+function vcard_perm_check() {
+  if (user_access('download vcard') OR user_access('download vcard with e-mail')) {
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/**
+ * Implementation of hook_user().
+ * Adds a vcard icon and link to the user page
+ * PSM changed $account->uid to $account->name to get a better filename; e.g., peterm.vcf
+ */
+function vcard_user($op, &$edit, &$account, $category = NULL) {
+  global $user;
+  
+  switch ($op) {
+    case 'view':
+
+    // Check permissions
+    if (user_access('have vcard', $account) && vcard_perm_check() && _vcard_init()) {
+      // Attach vCard to profile
+      $account->content['vcard'] = array(
+        '#type' => 'user_profile_item',
+        '#title' => t('vCard'),
+        '#value' => theme('image', drupal_get_path('module', 'vcard') .'/vcard.png', t('Download vcard')) .' '. l(t('Download vcard'), 'user/'. $account->uid .'/vcard', array('absolute' => FALSE, 'html' => TRUE)),
+        '#weight' => 10,
+        '#attributes' => array('class' => 'vcard-link'),
+      );
+    }
+  }
+}
+
+/**
+ * Retrieve a user's vcard
+ */
+function vcard_get($uid) {
+  $account = user_load(array('uid' => $uid));
+  $account->uid = $uid;
+  $vcard = _vcard_init();
+	
+
+  $first = vcard_get_field('givenname', $account);
+  $last = vcard_get_field('familyname', $account);
+  if (!empty($first) && !empty($last)) {
+      $vcard->setName($last, $first, '', '', '');
+      $vcard->setFormattedName($first .' '. $last);
+  }
+  else {
+      $vcard->setName($account->name, '', '', '', '');
+      $vcard->setFormattedname($account->name);
+  }
+  
+  if (user_access('download vcard with e-mail')) {
+    $vcard->addEmail($account->mail);
+  }
+  $vcard->addNickname($account->name);
+
+  // Birthday
+  $birthday = vcard_get_field('birthday', $account);
+  if (!empty($birthday)) {
+    if (is_array($birthday)) {
+      $bday = $birthday['year'] .'-'. $birthday['month'] .'-'. $birthday['day'];
+      $vcard->setBirthday($bday);
+    }
+    else {
+      $vcard->setBirthday($bday);
+    }
+  }
+
+  // Organization
+  $org = vcard_get_field('organization', $account);
+  if (!empty($org)) {
+    $vcard->addOrganization($org);
+  }
+
+  // URL
+  $url = vcard_get_field('url', $account);
+  if (!empty($url)) {
+    $vcard->setURL($url);
+  }
+
+  // Telephone
+  $tel = vcard_get_field('telephone', $account);
+  if (!empty($tel)) {
+    $vcard->addTelephone($tel);
+	$vcard->addParam('Type', 'Work');
+  }
+
+/* 
+ * PSM modification to vCard module are in this section 
+*/
+// $note_field gets built upon depending on assistant and emergency_position info
+$note_field = '';
+
+	// Add home telephone number
+	if (!empty($account->profile_home_telephone)) {
+		$vcard->addTelephone($account->profile_home_telephone);
+		$vcard->addParam('Type', 'Home');
+		}
+	// Add mobile telephone number
+	if (!empty($account->profile_mobile_telephone)) {
+		$vcard->addTelephone($account->profile_mobile_telephone);
+		$vcard->addParam('Type', 'Cell');
+		}
+	// Add Assistant and Assistant Phone to Notes field
+	if (!empty($account->profile_assistant)) {
+		$asst_info = "Assistant: " . $account->profile_assistant . " - " . $account->profile_assistant_phone . "\n";
+		// Add EOC Other Contacts to Notes field
+		if (!empty($account->profile_eoc_other_contacts)) {
+			$asst_info .= "Other Contacts: " . $account->profile_eoc_other_contacts . "\n";
+		}
+		$note_field = $asst_info;
+		
+		//$vcard->setNote($asst_info);
+	}
+
+	// PSM - Add the Title
+	if (!empty($account->profile_title)) {
+		$vcard->setTitle($account->profile_title);
+		}
+	
+	// PSM - Add the revision of this vCard
+	if (!empty($account->profile_revision)) {
+		$vcard->setRevision($account->profile_revision);
+		}
+		
+	// PSM - Add EOC Role per CG 082510
+	// EOC Role == Emergency Position ??
+	if (!empty($account->profile_emergency_position)) {
+		$note_field .= "Emergency Position: " . $account->profile_emergency_position . "\n";
+	}
+	
+	// set the Note Field for any info added above
+	$vcard->setNote($note_field);
+	
+/* end PSM mods */
+
+
+  // Address
+  $street = vcard_get_field('street', $account);
+  $city = vcard_get_field('city', $account);
+  $province = vcard_get_field('province', $account);
+  $postal = vcard_get_field('postal', $account);
+  $country = vcard_get_field('country', $account);
+
+  $vcard->addAddress('', '', $street, $city, $province, $postal, $country);
+
+  if ($account->location['latitude'] && $account->location['longitude']) {
+    $vcard->setGeo($account->location['latitude'], $account->location['longitude']);
+  }
+
+  return $vcard;
+
+}
+
+/**
+ * VCard for direct download
+ * PSM mod for Full Name after doing a user_load on the $uid
+ * from there we can parse out a full name and make it the file title
+ */
+function vcard_fetch($uid) {
+  $vcard = vcard_get($uid);
+  $account = user_load(array('uid' => $uid)); /* PSM */
+  $download_fullname = $account->profile_first . " " . $account->profile_last; /*PSM */
+  header('Content-type: text/x-vcard');
+  header('Content-Disposition: attachment; filename="'. $download_fullname .'.vcf"'); /* PSM was $account->name */
+  print $vcard->fetch();
+  exit;
+}
+
+/**
+ * Map profile data to vcard fields
+ */
+function vcard_get_field($field, $account) {
+  static $vcard_map;
+  if (empty($vcard_map[$account->uid])) {
+    $vcard_map[$account->uid] = _vcard_get_map($account);
+  }
+  if (is_array($vcard_map[$account->uid][$field])) {
+    foreach ($vcard_map[$account->uid][$field] as $key => $value) {
+      $vcard_map[$account->uid][$field][$key] = check_plain($value);
+    }
+  }
+  else {
+    $vcard_map[$account->uid][$field] = check_plain($vcard_map[$account->uid][$field]);
+  }
+  return $vcard_map[$account->uid][$field];
+}
+
+/**
+ * Ensures the vcard PEAR library is available and returns the vCard builder
+ * object.
+ *
+ * @return vCard object, null if library is not available.
+ */
+function _vcard_init() {
+  if (@include_once('Contact_Vcard_Build.php')) {
+    $vcard = new Contact_Vcard_Build();
+  }
+  return isset($vcard) ? $vcard : FALSE;
+}
+
+/**
+ * PSM modified (added) title, note, revision
+ */
+function _vcard_properties() {
+  return array(
+    'givenname'     => t('Given Name'),
+    'familyname'    => t('Family name'),
+    'birthday'      => t('Birthday'),
+	'title'			=> t('Title'),
+	'note'			=> t('Note'),
+	'revision'		=> t('Revision'),
+    'organization'  => t('Organization'),
+    'telephone'     => t('Telephone'),
+    'url'           => t('URL'),
+    'street'        => t('Street'),
+    'city'          => t('City'),
+    'postal'        => t('Postal'),
+    'province'      => t('Province'),
+    'country'       => t('Country'),
+	'eoc_role'		=> t('EOC Role'), // note the inconsistency in naming
+  );
+}
+
+/**
+ *
+ */
+function _vcard_get_map($account) {
+  $map = array();
+  $result = db_query('SELECT fid, name FROM {profile_fields}');
+  while ($field = db_fetch_object($result)) {
+    $mapped = variable_get('vcard_profile_'. $field->fid, 0);
+    if ($mapped && isset($account->{$field->name})) {
+      $map[$mapped] = $account->{$field->name};
+    }
+  }
+  return $map;
+}
+
+
+
+/**
+ * Implementation of hook_theme().
+ */
+function vcard_theme($existing, $type, $theme, $path) {
+  return array(
+    'vcard' => array(
+      'arguments' => array('account' => NULL),
+    ),
+  );
+}
+
+
+/**
+ * Displays user contact information decorated with hCard microformats.
+ *
+ * Use this in your theme to replace theme_user_profile() or
+ * theme_profile_listing()
+ *
+ * Uses hCard as the default xHTML
+ * see http://microformats.org/wiki/hcard
+ *
+ * @param $account user object
+ */
+function theme_vcard($account) {
+  // photo
+  if (variable_get('user_pictures', 0)) {
+    if ($account->picture && file_exists($account->picture)) {
+      $picture = file_create_url($account->picture);
+    }
+    else if (variable_get('user_picture_default', '')) {
+      $picture = variable_get('user_picture_default', '');
+    }
+  }
+  $photo = empty($picture) ? '' : '<img class="photo" src="'. $picture .'" alt="photo" />';
+
+  // name
+  $firstname = vcard_get_field('givenname', $account);
+  $lastname = vcard_get_field('familyname', $account);
+  if ($firstname || $lastname) {
+    $fullname = "";
+    $fullname .= $firstname ? '<span class="given-name">'. $firstname ."</span>\n" : '';
+    $fullname .= $lastname ? '<span class="family-name">'. $lastname ."</span>\n" : '';
+    if ($url = vcard_get_field('url', $account)) {
+      $fullname = l($fullname, $url, array('class' => 'n') ); 
+    }
+    $fullname .= '<span class="nickname">'. $account->name ."</span>\n";
+    $name = "<div class=\"n\">$fullname</div>\n";
+  }
+  else {
+    $name = '<div class="fn">'. $account->name ."</div>\n";
+  }
+
+  $street   = vcard_get_field('street', $account);
+  $city     = vcard_get_field('city', $account);
+  $province = vcard_get_field('province', $account);
+  $postal   = vcard_get_field('postal', $account);
+  $country  = vcard_get_field('country', $account);
+
+  $address = '';
+  if ($street || $city || $province || $postal || $country ) {
+    $address = '<div class="adr">';
+    $address .= ($street) ? '<div class="street-address">'. $street ."</div>\n" : '';
+    $address .= ($city) ? '<span class="locality">'. $city ."</span>\n" : '';
+    $address .= ($province) ? '<span class="region">'. $province ."</span>\n" : '';
+    $address .= ($postal) ? '<span class="postal-code">'. $postal ."</span>\n" : '';
+    $address .= ($country) ? '<span class="country-name">'. $country ."</span>\n" : '';
+    $address .=  "</div>\n";
+  }
+
+  $telephone = vcard_get_field('telephone', $account);
+  $tel = $telephone ? '<div class="tel">'. $telephone ."</div>\n" : '';
+  
+  $org = vcard_get_field('organization', $account);
+  $org = $org ? '<div class="org">'. $org ."</div>\n" : '';
+
+  $output  = '<div class="vcard">';
+  $output .= $photo;
+  $output .= $name;
+  $output .= $org;
+  $output .= $address;
+  $output .= $tel;
+  $output .= '<br class="clear" />';
+  $output .= "</div>\n";
+  return $output;
+}
+

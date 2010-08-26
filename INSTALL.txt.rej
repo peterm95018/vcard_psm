@@ -1,0 +1,44 @@
+*************** Installation instructions for vcard modu
+*** 18,31 ****
+     /**
+      * Override of theme_user_profile()
+      */
+-    function yourtheme_user_profile($account, $fields) {
+       if (module_exists("vcard")) {
+         return theme("vcard", $account);
+       }
+       else {
+-        return theme_user_profile($account, $fields);
+       }
+     }
+-    ?>
+  
+     For additional information on themeing read the handbook pages http://drupal.org/theme-guide.--- 18,45 ----
+     /**
+      * Override of theme_user_profile()
+      */
++    function yourtheme_user_profile($account) {
+       if (module_exists("vcard")) {
+         return theme("vcard", $account);
+       }
+       else {
++        return theme_user_profile($account);
+       }
+     }
++ 
++    /**
++     * Override of theme_profile_block()
++     * Adds microformats to the 'Author information' block
++     */
++     function yourtheme_profile_block($account) {
++       if (function_exists('theme_vcard')) {
++         return theme('vcard', $account);
++       }
++       else {
++         return theme_profile_listing($account);
++       }
++     }
++     
++     ?>
+  
+     For additional information on themeing read the handbook pages http://drupal.org/theme-guide.

@@ -1,0 +1,313 @@
+Index: vcard/INSTALL.txt
+===================================================================
+RCS file: /cvs/drupal-contrib/contributions/modules/vcard/INSTALL.txt,v
+retrieving revision 1.4.2.1
+diff -u -u -p -r1.4.2.1 INSTALL.txt
+--- vcard/INSTALL.txt	17 Jul 2008 22:29:03 -0000	1.4.2.1
++++ vcard/INSTALL.txt	7 Feb 2009 12:16:24 -0000
+@@ -18,14 +18,28 @@ Installation instructions for vcard modu
+    /**
+     * Override of theme_user_profile()
+     */
+-   function yourtheme_user_profile($account, $fields) {
++   function yourtheme_user_profile($account) {
+      if (module_exists("vcard")) {
+        return theme("vcard", $account);
+      }
+      else {
+-       return theme_user_profile($account, $fields);
++       return theme_user_profile($account);
+      }
+    }
+-   ?>
++
++   /**
++    * Override of theme_profile_block()
++    * Adds microformats to the 'Author information' block
++    */
++    function yourtheme_profile_block($account) {
++      if (function_exists('theme_vcard')) {
++        return theme('vcard', $account);
++      }
++      else {
++        return theme_profile_listing($account);
++      }
++    }
++    
++    ?>
+ 
+    For additional information on themeing read the handbook pages http://drupal.org/theme-guide.
+\ No newline at end of file
+Index: vcard/vcard.admin.inc
+===================================================================
+RCS file: /cvs/drupal-contrib/contributions/modules/vcard/vcard.admin.inc,v
+retrieving revision 1.1
+diff -u -u -p -r1.1 vcard.admin.inc
+--- vcard/vcard.admin.inc	17 Jul 2008 19:49:43 -0000	1.1
++++ vcard/vcard.admin.inc	7 Feb 2009 12:16:24 -0000
+@@ -28,6 +28,12 @@ function vcard_admin_settings() {
+       '#options' => $options,
+     );
+   }
++  $form['auto_create'] = array(
++    '#type' => 'submit',
++    '#value' => t('Auto-create profile fields'),
++    '#description' => t("Attempt to create the normal required profile fields, if you haven't already done so'"),
++  );
++  $form['#submit'][] = 'vcard_auto_create_profile_submit'; 
+ 
+   return system_settings_form($form);
+ }
+@@ -42,4 +48,98 @@ function _vcard_profile_fields() {
+     $output[$row->fid] = $row->title;
+   }
+   return $output;
+-}
+\ No newline at end of file
++}
++
++
++/**
++ * Add an action to auto-create a detailed contact profile with consistant
++ * names.
++ *
++ * Capture the vcard settings submission, and act on the button if pressed.
++ *  
++ * Although I could have just over-written everything, instead I take care to
++ * absorb half-profiles that have already been made, possibly with different
++ * names, and not replace anything that already works OK. This process just adds
++ * the supplimental contact vCard fields. Thus it should be safe to run as an
++ * upgrade over anything you already have.
++ */
++function vcard_auto_create_profile_submit($form, &$form_state) {
++  if ($form_state['clicked_button']['#value'] == t('Auto-create profile fields')) {
++    drupal_set_message(t("Creating required profile fields"));
++    $required_fields = _vcard_properties();
++
++    // Load in all currently existing fields, to see what exists and what they are matched to so far.
++    $available_fields = array();
++    $available_fields_result = db_query('SELECT * FROM {profile_fields} ORDER BY weight ');
++    while ($field = db_fetch_object($available_fields_result)) {
++      // Index these on a version of the internal id, not the text label
++      $key = preg_replace('|^profile_|', '', $field->name);
++      if ($linked = variable_get('vcard_profile_'. $field->fid, "")) {
++        // This field is already linked to a vcard tag. Add it to the index in the right place
++        $key = $linked;
++      }
++      // There may be confusion if there are more than one field named the same. Don't do that.
++      if (empty($available_fields[$key])) {
++        $available_fields[$key] = $field;
++      }
++    }
++    $vcard_fields = _vcard_profile_fields();
++
++    foreach ($required_fields as $required_field_id => $required_field_label) {
++      // Check if a field with its label is already existing
++      if (in_array($required_field_id, array_keys($available_fields))) {
++        $field_def = $available_fields[$required_field_id];
++        drupal_set_message(t(
++          "<a href='!field_link'>%field_label</a> already exists as a profile field. %alt_name", 
++          array(
++            '%field_label' => $required_field_label, 
++            '!field_link'  => url('admin/user/profile/edit/'. $field_def->fid), 
++            '%alt_name'    => (($field_def->title != $required_field_label) ? " (called $field_def->title)" : "")
++          )
++        ));
++      }
++      else {
++        // need to make it
++        drupal_set_message(t("Creating profile field ") . $required_field_label);
++        // @see profile_field_form_submit()
++        $field_def = array(
++          'title'       => $required_field_label, 
++          'name'        => 'profile_'. $required_field_id, 
++          'explanation' => '', 
++          'category'    => 'Contact Information', 
++          'type'        => 'textfield', 
++          'weight'      => 0, 
++          'required'    => 0, 
++          'register'    => 1, 
++          'visibility'  => 2,
++        );
++        if ($required_field_id == 'url') {$field_def['type']='url';}
++        if ($required_field_id == 'birthday') {$field_def['type']='date';}
++
++        drupal_write_record('profile_fields', $field_def);
++        // retrieve its new ID
++        $result = db_query('SELECT * FROM {profile_fields} WHERE name = "%s"', $field_def['name']);
++        $field_def = db_fetch_object($result);
++      }
++      // Now check the right profile field is matched up with the right vcard field
++      if ($field_def && (variable_get('vcard_profile_'. $field_def->fid, '') != $required_field_id)) {
++        drupal_set_message(t(
++          "Assigning profile field %fid (<a href='!field_link'>%title</a>) to vcard key %required_field_id", 
++          array(
++            '%fid' => $field_def->fid,
++            '%title' => $field_def->title,
++            '%required_field_id' => $required_field_id,
++            '!field_link' => url('admin/user/profile/edit/'. $field_def->fid)
++          )
++        ));
++        variable_set('vcard_profile_'. $field_def->fid, $required_field_id);
++      }
++    }
++    drupal_set_message(t("
++      Created profile fields! You may want to review the profile settings
++      individually to ensure their display order and public visibility 
++      settings are right for you. 
++      By default they are all displayed on the users profile page.  
++    "));
++  }
++}
+Index: vcard/vcard.module
+===================================================================
+RCS file: /cvs/drupal-contrib/contributions/modules/vcard/vcard.module,v
+retrieving revision 1.17.2.5
+diff -u -u -p -r1.17.2.5 vcard.module
+--- vcard/vcard.module	6 Oct 2008 21:41:40 -0000	1.17.2.5
++++ vcard/vcard.module	7 Feb 2009 12:16:24 -0000
+@@ -44,15 +44,39 @@ function vcard_help($path, $arg) {
+         </p>
+         <p>
+         Web browsers and !aggregation_tools can also extract and use vCard-like information when it is displayed on the page using !hcard - an embedded !microformat.
+-        Read the module's documentation for more information on how to add hCard support to your theme.
++        Read the vCard module's INSTALL.txt documentation for more information on how to add hCard support to your theme.
+         </p>
+         <pre>",
+         array(
+           '!aggregation_tools' => l('aggregation tools', 'https://addons.mozilla.org/en-US/firefox/addon/2240'),
+           '!hcard' => l('hCard', 'http://microformats.org/wiki/hcard'),
+-          '!microformat' => l('microformat', 'http://microformats.org'),hook
++          '!microformat' => l('microformat', 'http://microformats.org'),
+         )
+       );
++      break;
++    case 'admin/user/profile':
++      return t("<p>
++        For assistance setting up a default profile with common fields, visit
++        <a href='!vcard_settings_link'>the VCard settings</a> which can preset an automatic profile definition.
++      </p><p>
++        To enable machine-readable <a href='!microformat_link'>microformats</a>
++        for your profiles, see the <a href='!vcard_help_link'>vCard help</a> and README. 
++      </p>",
++      array(
++        '!vcard_settings_link' => url('admin/settings/vcard'),
++        '!vcard_help_link' => url('admin/help/vcard'),
++        '!microformat_link' => url('http://microformats.org'),
++      )
++    );
++    case 'admin/settings/vcard':
++      return t("
++        Profile fields are added and administered on
++        <a href='!profile_settings_link'>the Profile Configuration page</a>.
++      ",
++      array(
++        '!profile_settings_link' => url('admin/user/profile'),
++      )
++    );
+   }
+ }
+ 
+@@ -133,6 +157,7 @@ function vcard_user($op, &$edit, &$accou
+  */
+ function vcard_get($uid) {
+   $account = user_load(array('uid' => $uid));
++  $account->uid = $uid;
+   $vcard = _vcard_init();
+ 
+   $first = vcard_get_field('givenname', $account);
+@@ -213,12 +238,12 @@ function vcard_fetch($uid) {
+  */
+ function vcard_get_field($field, $account) {
+   static $vcard_map;
+-  
++
+   if (empty($vcard_map[$account->uid])) {
+     $vcard_map[$account->uid] = _vcard_get_map($account);
+   }
+   
+-  return $vcard_map[$account->uid][$field];
++  return isset($vcard_map[$account->uid][$field]) ? $vcard_map[$account->uid][$field] : NULL;
+ }
+ 
+ /**
+@@ -231,7 +256,7 @@ function _vcard_init() {
+   if (@include_once('Contact_Vcard_Build.php')) {
+     $vcard = new Contact_Vcard_Build();
+   }
+-  return $vcard ? $vcard : FALSE;
++  return isset($vcard) ? $vcard : FALSE;
+ }
+ 
+ /**
+@@ -261,7 +286,7 @@ function _vcard_get_map($account) {
+   $result = db_query('SELECT fid, name FROM {profile_fields}');
+   while ($field = db_fetch_object($result)) {
+     $mapped = variable_get('vcard_profile_'. $field->fid, 0);
+-    if ($mapped) {
++    if ($mapped && isset($account->{$field->name})) {
+       $map[$mapped] = $account->{$field->name};
+     }
+   }
+@@ -301,20 +326,21 @@ function theme_vcard($account) {
+     else if (variable_get('user_picture_default', '')) {
+       $picture = variable_get('user_picture_default', '');
+     }
+-    if ($picture) {
+-      $photo = '<img class="photo" src="'. $picture .'" alt="photo" />';
+-    }
+   }
++  $photo = empty($picture) ? '' : '<img class="photo" src="'. $picture .'" alt="photo" />';
+ 
+   // name
+   $firstname = vcard_get_field('givenname', $account);
+   $lastname = vcard_get_field('familyname', $account);
+-  if ($firstname && $lastname) {
+-    $name = '<div class="n">';
+-    $name .= '<span class="given-name">'. $firstname ."</span>\n";
+-    $name .= '<span class="family-name">'. $lastname ."</span>\n";
+-    $name .= '<span class="nickname">'. $account->name ."</span>\n";
+-    $name .= "</div>\n";
++  if ($firstname || $lastname) {
++    $fullname = "";
++    $fullname .= $firstname ? '<span class="given-name">'. $firstname ."</span>\n" : '';
++    $fullname .= $lastname ? '<span class="family-name">'. $lastname ."</span>\n" : '';
++    if ($url = vcard_get_field('url', $account)) {
++      $fullname = l($fullname, $url, array('class' => 'n') ); 
++    }
++    $fullname .= '<span class="nickname">'. $account->name ."</span>\n";
++    $name = "<div class=\"n\">$fullname</div>\n";
+   }
+   else {
+     $name = '<div class="fn">'. $account->name ."</div>\n";
+@@ -326,6 +352,7 @@ function theme_vcard($account) {
+   $postal   = vcard_get_field('postal', $account);
+   $country  = vcard_get_field('country', $account);
+ 
++  $address = '';
+   if ($street || $city || $province || $postal || $country ) {
+     $address = '<div class="adr">';
+     $address .= ($street) ? '<div class="street-address">'. $street ."</div>\n" : '';
+@@ -336,15 +363,13 @@ function theme_vcard($account) {
+     $address .=  "</div>\n";
+   }
+ 
+-  if ($telephone = vcard_get_field('telephone', $account)) {
+-    $tel = '<div class="tel">'. $telephone ."</div>\n";
+-  }
+-
+-  if ($org = vcard_get_field('organization', $account)) {
+-    $org = '<div class="org">'. $org ."</div>\n";
+-  }
++  $telephone = vcard_get_field('telephone', $account);
++  $tel = $telephone ? '<div class="tel">'. $telephone ."</div>\n" : '';
++  
++  $org = vcard_get_field('organization', $account);
++  $org = $org ? '<div class="org">'. $org ."</div>\n" : '';
+ 
+-  $output .= '<div class="vcard">';
++  $output  = '<div class="vcard">';
+   $output .= $photo;
+   $output .= $name;
+   $output .= $org;
+
